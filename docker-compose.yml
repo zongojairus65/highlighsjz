@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    depends_on:
+      - redis
+    environment:
+      - REDIS_URL=redis://redis:6379
+    restart: unless-stopped
+
+  api-ts:
+    build:
+      context: .
+      dockerfile: Dockerfile.ts
+    ports:
+      - "3000:3000"
+    depends_on:
+      - redis
+    environment:
+      - REDIS_URL=redis://redis:6379
+
+  api-go:
+    build:
+      context: .
+      dockerfile: Dockerfile.go
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+    environment:
+      - REDIS_ADDR=redis:6379
+
+  api-rust:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api-ts
+    environment:
+      - UPSTREAM_WS=ws://api-ts:3000
