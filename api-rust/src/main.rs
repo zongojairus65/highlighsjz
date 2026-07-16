@@ -1,5 +1,8 @@
 use axum::{
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     http::Method,
     response::IntoResponse,
     routing::get,
@@ -30,7 +33,6 @@ pub struct AppState {
     pub tx: broadcast::Sender<Match>,
 }
 
-/// Connexion au WebSocket de l'API TypeScript (port 3000)
 async fn connect_upstream(ws_url: &str, state: AppState) {
     loop {
         match tokio_tungstenite::connect_async(ws_url).await {
@@ -39,15 +41,19 @@ async fn connect_upstream(ws_url: &str, state: AppState) {
                 let (_, mut read) = ws_stream.split();
 
                 while let Some(Ok(msg)) = read.next().await {
-                    if let Message::Text(text) = msg {
-                        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) {
-                            // Le message peut être { type: "LIVE_UPDATE", data: {...} }
+                    // Utilisation explicite du type tungstenite::Message
+                    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                        if let Ok(payload) =
+                            serde_json::from_str::<serde_json::Value>(&text)
+                        {
                             let data = payload
                                 .get("data")
                                 .or_else(|| payload.as_object().map(|_| &payload));
 
                             if let Some(data) = data {
-                                if let Ok(m) = serde_json::from_value::<Match>(data.clone()) {
+                                if let Ok(m) =
+                                    serde_json::from_value::<Match>(data.clone())
+                                {
                                     state.matches.insert(m.id.clone(), m.clone());
                                     let _ = state.tx.send(m);
                                 }
@@ -58,15 +64,17 @@ async fn connect_upstream(ws_url: &str, state: AppState) {
                 println!("[Rust] WebSocket upstream déconnecté, reconnexion...");
             }
             Err(e) => {
-                eprintln!("[Rust] Erreur connexion upstream: {} — reconnexion dans 5s", e);
+                eprintln!(
+                    "[Rust] Erreur connexion upstream: {} — reconnexion dans 5s",
+                    e
+                );
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
         }
     }
 }
 
-/// GET /api/matches
-async fn get_matches(state: axum::extract::State<AppState>) -> Json<serde_json::Value> {
+async fn get_matches(State(state): State<AppState>) -> Json<serde_json::Value> {
     let all: Vec<Match> = state
         .matches
         .iter()
@@ -79,10 +87,9 @@ async fn get_matches(state: axum::extract::State<AppState>) -> Json<serde_json::
     }))
 }
 
-/// WebSocket endpoint — diffuse les mises à jour en temps réel
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    state: axum::extract::State<AppState>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
@@ -129,13 +136,11 @@ async fn main() {
         tx,
     };
 
-    // Lance la connexion upstream dans une tâche séparée
     let state_clone = state.clone();
     tokio::spawn(async move {
         connect_upstream(&upstream_url, state_clone).await;
     });
 
-    // Middleware CORS
     let cors = CorsLayer::new()
         .allow_methods([Method::GET])
         .allow_origin(Any);
@@ -149,4 +154,4 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     println!("[Rust] Serveur sur {}", bind_addr);
     axum::serve(listener, app).await.unwrap();
-}
+        }
