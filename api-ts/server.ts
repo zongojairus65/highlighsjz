@@ -17,86 +17,121 @@ interface Match {
 }
 
 // ---------- Redis ----------
-const redis: RedisClientType = createClient();
-redis.on('error', (err) => console.error('[Redis]', err));
+const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+const redis: RedisClientType = createClient({ url: redisUrl });
 
-async function connectRedis() {
-    await redis.connect();
-    console.log('[Redis] Connecté');
-}
+redis.on('error', (err) => {
+    console.error('[Redis] Error:', err);
+});
 
-async function getAllMatches(): Promise<Match[]> {
-    const keys = await redis.keys('match:*');
-    if (keys.length === 0) return [];
-    const raw = await redis.mGet(keys);
-    return raw
-        .filter((v): v is string => v !== null)
-        .map((v) => JSON.parse(v) as Match);
-}
+redis.on('connect', () => {
+    console.log('[Redis] Connected');
+});
 
-async function getMatchById(id: string): Promise<Match | null> {
-    const raw = await redis.get(`match:${id}`);
-    return raw ? (JSON.parse(raw) as Match) : null;
-}
-
-// ---------- Express ----------
+// ---------- Express & WebSocket ----------
 const app = express();
 const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
 app.use(cors());
 app.use(express.json());
 
-// GET /api/matches
-app.get('/api/matches', async (_req: Request, res: Response) => {
-    try {
-        const matches = await getAllMatches();
-        res.json({ count: matches.length, matches });
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur interne' });
-    }
-});
+// Store connected clients
+const clients: Set<WebSocket> = new Set();
 
-// GET /api/matches/:id
-app.get('/api/matches/:id', async (req: Request, res: Response) => {
-    try {
-        const match = await getMatchById(req.params.id);
-        if (!match) return res.status(404).json({ error: 'Match introuvable' });
-        res.json(match);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur interne' });
-    }
-});
-
-// ---------- WebSocket ----------
-const wss = new WebSocketServer({ server });
-
+// WebSocket connection
 wss.on('connection', (ws: WebSocket) => {
-    console.log('[WS] Client connecté');
+    console.log('[WS] New client connected');
+    clients.add(ws);
 
-    const subscriber = redis.duplicate();
-    subscriber.connect();
-    subscriber.subscribe('live:matches', (message) => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'LIVE_UPDATE', data: JSON.parse(message) }));
+    ws.on('message', async (data) => {
+        try {
+            const message = JSON.parse(data.toString());
+            if (message.type === 'subscribe') {
+                // Subscribe to Redis channel
+                const subscriber = redis.duplicate();
+                await subscriber.connect();
+                
+                subscriber.on('message', (channel, msg) => {
+                    ws.send(JSON.stringify({
+                        type: 'update',
+                        data: JSON.parse(msg)
+                    }));
+                });
+
+                await subscriber.subscribe(message.channel, (msg) => {
+                    // Already handled in on('message')
+                });
+            }
+        } catch (err) {
+            console.error('[WS] Error:', err);
         }
     });
 
     ws.on('close', () => {
-        subscriber.unsubscribe('live:matches');
-        subscriber.quit();
-        console.log('[WS] Client déconnecté');
+        console.log('[WS] Client disconnected');
+        clients.delete(ws);
+    });
+
+    ws.on('error', (err) => {
+        console.error('[WS] Error:', err);
     });
 });
 
-// ---------- Démarrage ----------
-const PORT = process.env.PORT || 3000;
+// REST API endpoints
+app.get('/api/matches', async (req: Request, res: Response) => {
+    try {
+        const matches = await redis.get('matches');
+        if (matches) {
+            res.json(JSON.parse(matches));
+        } else {
+            res.json([]);
+        }
+    } catch (err) {
+        console.error('[API] Error fetching matches:', err);
+        res.status(500).json({ error: 'Failed to fetch matches' });
+    }
+});
 
-async function start() {
-    await connectRedis();
+app.post('/api/matches/update', async (req: Request, res: Response) => {
+    try {
+        const matches = req.body;
+        await redis.set('matches', JSON.stringify(matches));
+        
+        // Notify WebSocket clients
+        clients.forEach((client) => {
+            if (client.readyState === 1) {
+                client.send(JSON.stringify({
+                    type: 'update',
+                    data: matches
+                }));
+            }
+        });
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[API] Error updating matches:', err);
+        res.status(500).json({ error: 'Failed to update matches' });
+    }
+});
+
+// Health check
+app.get('/health', (req: Request, res: Response) => {
+    res.json({ status: 'ok' });
+});
+
+// Connect Redis and start server
+(async () => {
+    try {
+        await redis.connect();
+        console.log('[Redis] Connected to Redis');
+    } catch (err) {
+        console.error('[Redis] Failed to connect:', err);
+    }
+
+    const PORT = process.env.PORT || 3000;
     server.listen(PORT, () => {
         console.log(`[API] http://localhost:${PORT}/api/matches`);
         console.log(`[WS]  ws://localhost:${PORT}`);
     });
-}
-
-start();
+})();
