@@ -1,0 +1,9 @@
+**/node_modules
+**/__pycache__
+**/target
+**/.env
+**/dist
+**/*.pyc
+.git
+.gitignore
+README.md
