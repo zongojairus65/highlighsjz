@@ -6,7 +6,6 @@ import http from 'http';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJsdoc from 'swagger-jsdoc';
 
-// ---------- Swagger Config ----------
 const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
@@ -31,7 +30,6 @@ const swaggerOptions = {
 
 const swaggerDocs = swaggerJsdoc(swaggerOptions);
 
-// ---------- Types ----------
 interface Match {
     id: string;
     home_team: string;
@@ -43,7 +41,6 @@ interface Match {
     updated_at: string;
 }
 
-// ---------- Redis ----------
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 const redis: RedisClientType = createClient({ 
   url: redisUrl,
@@ -61,7 +58,6 @@ redis.on('connect', () => {
     console.log('[Redis] Connected');
 });
 
-// ---------- Express & WebSocket ----------
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -69,16 +65,13 @@ const wss = new WebSocketServer({ server });
 app.use(cors());
 app.use(express.json());
 
-// Swagger UI
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 app.get('/swagger.json', (req: Request, res: Response) => {
     res.json(swaggerDocs);
 });
 
-// Store connected clients
 const clients: Set<WebSocket> = new Set();
 
-// WebSocket connection
 wss.on('connection', (ws: WebSocket) => {
     console.log('[WS] New client connected');
     clients.add(ws);
@@ -125,14 +118,6 @@ wss.on('connection', (ws: WebSocket) => {
  *     responses:
  *       200:
  *         description: Service actif
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 status:
- *                   type: string
- *                   example: ok
  */
 app.get('/health', (req: Request, res: Response) => {
     res.json({ status: 'ok' });
@@ -140,46 +125,76 @@ app.get('/health', (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/seed:
+ *   post:
+ *     summary: Injecter des données de test (dev only)
+ *     tags: [Dev]
+ *     responses:
+ *       200:
+ *         description: Données injectées
+ */
+app.post('/api/seed', async (req: Request, res: Response) => {
+    const testMatches: Match[] = [
+        {
+            id: "1",
+            home_team: "PSG",
+            away_team: "OL",
+            score: "2-1",
+            status: "live",
+            minute: 45,
+            league: "Ligue 1",
+            updated_at: new Date().toISOString()
+        },
+        {
+            id: "2",
+            home_team: "Monaco",
+            away_team: "Marseille",
+            score: "1-0",
+            status: "live",
+            minute: 30,
+            league: "Ligue 1",
+            updated_at: new Date().toISOString()
+        },
+        {
+            id: "3",
+            home_team: "Manchester United",
+            away_team: "Liverpool",
+            score: "0-0",
+            status: "scheduled",
+            minute: 0,
+            league: "Premier League",
+            updated_at: new Date().toISOString()
+        }
+    ];
+
+    try {
+        await redis.set('matches', JSON.stringify(testMatches));
+        
+        clients.forEach((client) => {
+            if (client.readyState === 1) {
+                client.send(JSON.stringify({
+                    type: 'update',
+                    data: testMatches
+                }));
+            }
+        });
+
+        res.json({ success: true, count: testMatches.length });
+    } catch (err) {
+        console.error('[API] Error seeding:', err);
+        res.status(500).json({ error: 'Failed to seed data' });
+    }
+});
+
+/**
+ * @swagger
  * /api/matches:
  *   get:
- *     summary: Récupérer tous les matchs en direct
+ *     summary: Récupérer tous les matchs
  *     tags: [Matches]
  *     responses:
  *       200:
  *         description: Liste des matchs
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 type: object
- *                 properties:
- *                   id:
- *                     type: string
- *                     example: "1"
- *                   home_team:
- *                     type: string
- *                     example: "PSG"
- *                   away_team:
- *                     type: string
- *                     example: "OL"
- *                   score:
- *                     type: string
- *                     example: "2-1"
- *                   status:
- *                     type: string
- *                     example: "live"
- *                   minute:
- *                     type: number
- *                     example: 45
- *                   league:
- *                     type: string
- *                     example: "Ligue 1"
- *                   updated_at:
- *                     type: string
- *                     example: "2026-07-16T23:53:00Z"
- *       500:
- *         description: Erreur serveur
  */
 app.get('/api/matches', async (req: Request, res: Response) => {
     try {
@@ -199,7 +214,7 @@ app.get('/api/matches', async (req: Request, res: Response) => {
  * @swagger
  * /api/matches/update:
  *   post:
- *     summary: Mettre à jour les matchs (notifie WebSocket)
+ *     summary: Mettre à jour les matchs
  *     tags: [Matches]
  *     requestBody:
  *       required: true
@@ -207,44 +222,12 @@ app.get('/api/matches', async (req: Request, res: Response) => {
  *         application/json:
  *           schema:
  *             type: array
- *             items:
- *               type: object
- *               properties:
- *                 id:
- *                   type: string
- *                 home_team:
- *                   type: string
- *                 away_team:
- *                   type: string
- *                 score:
- *                   type: string
- *                 status:
- *                   type: string
- *                 minute:
- *                   type: number
- *                 league:
- *                   type: string
- *                 updated_at:
- *                   type: string
- *     responses:
- *       200:
- *         description: Matchs mis à jour
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *       500:
- *         description: Erreur serveur
  */
 app.post('/api/matches/update', async (req: Request, res: Response) => {
     try {
         const matches = req.body;
         await redis.set('matches', JSON.stringify(matches));
         
-        // Notify WebSocket clients
         clients.forEach((client) => {
             if (client.readyState === 1) {
                 client.send(JSON.stringify({
@@ -261,7 +244,6 @@ app.post('/api/matches/update', async (req: Request, res: Response) => {
     }
 });
 
-// Connect Redis and start server
 (async () => {
     try {
         await redis.connect();
