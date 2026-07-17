@@ -1,2 +1,2 @@
 aiohttp>=3.9,<4
-aioredis>=2.0,<3
+redis[asyncio]>=5.0,<6
