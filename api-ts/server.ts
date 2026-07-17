@@ -42,12 +42,15 @@ interface Match {
 }
 
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-const redis: RedisClientType = createClient({ 
+// N'active TLS que si l'URL l'exige réellement (rediss:// ou Upstash).
+// Sinon ça casse la connexion vers un Redis local/docker-compose en clair.
+const useTLS = redisUrl.startsWith('rediss://') || redisUrl.includes('upstash.io');
+
+const redis: RedisClientType = createClient({
   url: redisUrl,
-  socket: {
-    tls: true,
-    rejectUnauthorized: false
-  }
+  socket: useTLS
+    ? { tls: true, rejectUnauthorized: false }
+    : {}
 });
 
 redis.on('error', (err) => {
@@ -57,6 +60,23 @@ redis.on('error', (err) => {
 redis.on('connect', () => {
     console.log('[Redis] Connected');
 });
+
+// Clé API pour protéger les routes d'écriture. Si non définie, ces routes
+// restent ouvertes en local (dev), mais un avertissement est affiché.
+const API_KEY = process.env.API_KEY;
+if (!API_KEY) {
+    console.warn('[API] ⚠️ API_KEY non définie — /api/seed et /api/matches/update sont NON protégées');
+}
+
+function requireApiKey(req: Request, res: Response, next: () => void) {
+    if (!API_KEY) return next(); // pas de clé configurée = pas de vérif (dev only)
+    const provided = req.header('x-api-key');
+    if (provided !== API_KEY) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+    next();
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -72,32 +92,28 @@ app.get('/swagger.json', (req: Request, res: Response) => {
 
 const clients: Set<WebSocket> = new Set();
 
-wss.on('connection', (ws: WebSocket) => {
+function broadcast(data: unknown) {
+    const payload = JSON.stringify({ type: 'update', data });
+    clients.forEach((client) => {
+        if (client.readyState === 1) {
+            client.send(payload);
+        }
+    });
+}
+
+wss.on('connection', async (ws: WebSocket) => {
     console.log('[WS] New client connected');
     clients.add(ws);
 
-    ws.on('message', async (data) => {
-        try {
-            const message = JSON.parse(data.toString());
-            if (message.type === 'subscribe') {
-                const subscriber = redis.duplicate();
-                await subscriber.connect();
-                
-                subscriber.on('message', (channel, msg) => {
-                    ws.send(JSON.stringify({
-                        type: 'update',
-                        data: JSON.parse(msg)
-                    }));
-                });
-
-                await subscriber.subscribe(message.channel, (msg) => {
-                    // Already handled in on('message')
-                });
-            }
-        } catch (err) {
-            console.error('[WS] Error:', err);
+    // Envoie l'état courant dès la connexion, pas besoin d'attendre un update
+    try {
+        const matches = await redis.get('matches');
+        if (matches) {
+            ws.send(JSON.stringify({ type: 'update', data: JSON.parse(matches) }));
         }
-    });
+    } catch (err) {
+        console.error('[WS] Error sending initial state:', err);
+    }
 
     ws.on('close', () => {
         console.log('[WS] Client disconnected');
@@ -108,6 +124,23 @@ wss.on('connection', (ws: WebSocket) => {
         console.error('[WS] Error:', err);
     });
 });
+
+// Un seul abonnement Redis global (au lieu d'un par client) qui rediffuse
+// à tous les clients connectés dès que le collector publie une mise à jour.
+const CHANNEL = 'matches_updates';
+(async () => {
+    const subscriber = redis.duplicate();
+    subscriber.on('error', (err) => console.error('[Redis Sub] Error:', err));
+    await subscriber.connect();
+    await subscriber.subscribe(CHANNEL, (msg) => {
+        try {
+            broadcast(JSON.parse(msg));
+        } catch (err) {
+            console.error('[WS] Error broadcasting:', err);
+        }
+    });
+    console.log(`[Redis Sub] Abonné au canal "${CHANNEL}"`);
+})();
 
 /**
  * @swagger
@@ -133,7 +166,7 @@ app.get('/health', (req: Request, res: Response) => {
  *       200:
  *         description: Données injectées
  */
-app.post('/api/seed', async (req: Request, res: Response) => {
+app.post('/api/seed', requireApiKey, async (req: Request, res: Response) => {
     const testMatches: Match[] = [
         {
             id: "1",
@@ -169,15 +202,7 @@ app.post('/api/seed', async (req: Request, res: Response) => {
 
     try {
         await redis.set('matches', JSON.stringify(testMatches));
-        
-        clients.forEach((client) => {
-            if (client.readyState === 1) {
-                client.send(JSON.stringify({
-                    type: 'update',
-                    data: testMatches
-                }));
-            }
-        });
+        broadcast(testMatches);
 
         res.json({ success: true, count: testMatches.length });
     } catch (err) {
@@ -223,19 +248,11 @@ app.get('/api/matches', async (req: Request, res: Response) => {
  *           schema:
  *             type: array
  */
-app.post('/api/matches/update', async (req: Request, res: Response) => {
+app.post('/api/matches/update', requireApiKey, async (req: Request, res: Response) => {
     try {
         const matches = req.body;
         await redis.set('matches', JSON.stringify(matches));
-        
-        clients.forEach((client) => {
-            if (client.readyState === 1) {
-                client.send(JSON.stringify({
-                    type: 'update',
-                    data: matches
-                }));
-            }
-        });
+        broadcast(matches);
 
         res.json({ success: true });
     } catch (err) {
