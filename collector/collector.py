@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import json
 from datetime import datetime
+import os
 import redis.asyncio as aioredis
 
 class LiveScoreCollector:
@@ -12,17 +13,18 @@ class LiveScoreCollector:
                 "parser": self._parse_thesportsdb,
             }
         ]
-        self.redis_url = "redis://localhost:6379"
+        self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
 
     async def connect_redis(self):
         self.redis = await aioredis.from_url(self.redis_url)
+        print(f"[Collector] Connecté à {self.redis_url}")
 
     async def fetch_and_sync(self):
         async with aiohttp.ClientSession() as session:
             while True:
                 try:
                     for source in self.sources:
-                        async with session.get(source["url"]) as resp:
+                        async with session.get(source["url"], timeout=aiohttp.ClientTimeout(total=10)) as resp:
                             data = await resp.json()
                             matches = source["parser"](data)
                             
@@ -32,7 +34,9 @@ class LiveScoreCollector:
                                     json.dumps(matches),
                                     ex=300
                                 )
-                                print(f"[Collector] {len(matches)} matchs syncés")
+                                print(f"[Collector] {len(matches)} matchs syncés à Redis")
+                            else:
+                                print("[Collector] Aucun match trouvé")
                 except Exception as e:
                     print(f"[Collector] Erreur : {e}")
                 
@@ -46,12 +50,12 @@ class LiveScoreCollector:
         matches = []
         for match_data in data.get("results", []):
             match = {
-                "id": match_data.get("idEvent"),
-                "home_team": match_data.get("strHomeTeam"),
-                "away_team": match_data.get("strAwayTeam"),
+                "id": match_data.get("idEvent", "unknown"),
+                "home_team": match_data.get("strHomeTeam", "Unknown"),
+                "away_team": match_data.get("strAwayTeam", "Unknown"),
                 "score": f"{match_data.get('intHomeScore', 0)}-{match_data.get('intAwayScore', 0)}",
                 "status": "live" if match_data.get("strStatus") == "Live" else "scheduled",
-                "minute": 0,
+                "minute": match_data.get("intRoundID", 0),
                 "league": match_data.get("strLeague", "Unknown"),
                 "updated_at": datetime.utcnow().isoformat(),
             }
@@ -61,9 +65,12 @@ class LiveScoreCollector:
 
 async def main():
     collector = LiveScoreCollector()
-    await collector.connect_redis()
-    print("[Collector] Connecté à Redis")
-    await collector.fetch_and_sync()
+    try:
+        await collector.connect_redis()
+        print("[Collector] Démarrage de la synchronisation...")
+        await collector.fetch_and_sync()
+    except Exception as e:
+        print(f"[Collector] Erreur fatale: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
