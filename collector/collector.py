@@ -131,6 +131,8 @@ class Scraper1xbet:
             return []
 
 class LiveScoreCollector:
+    CHANNEL = "matches_updates"
+
     def __init__(self):
         self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
         self.sofascore = SofascoreScraper()
@@ -162,10 +164,26 @@ class LiveScoreCollector:
                     # Enrichir avec IDs
                     for i, match in enumerate(all_matches):
                         match["id"] = str(i + 1)
+                        match["minute"] = match.get("minute", 0)
                         match["updated_at"] = datetime.utcnow().isoformat()
-                    
+
+                    # 1) Clé agrégée (utilisée par l'API TypeScript)
                     await self.redis.set("matches", json.dumps(all_matches), ex=300)
-                    print(f"[Collector] ✅ {len(all_matches)} matchs syncés")
+
+                    # 2) Une clé par match (utilisée par le cache Go: KEYS "match:*")
+                    #    On nettoie d'abord les anciennes clés pour éviter les matchs fantômes
+                    old_keys = await self.redis.keys("match:*")
+                    if old_keys:
+                        await self.redis.delete(*old_keys)
+                    pipe = self.redis.pipeline()
+                    for match in all_matches:
+                        pipe.set(f"match:{match['id']}", json.dumps(match), ex=300)
+                    await pipe.execute()
+
+                    # 3) Publier pour que l'API TS pousse en temps réel via WebSocket
+                    await self.redis.publish(self.CHANNEL, json.dumps(all_matches))
+
+                    print(f"[Collector] ✅ {len(all_matches)} matchs syncés + publiés")
                 else:
                     print("[Collector] ⚠️ Aucun match trouvé")
                 
