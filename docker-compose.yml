@@ -1,50 +1,26 @@
 version: "3.9"
 
+# Ce compose reproduit exactement ce qui tourne en prod (Render) :
+# une seule image (Dockerfile à la racine) qui lance TS + Go + Rust + le
+# collector Python via entrypoint.sh, plus un Redis local pour le dev.
 services:
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
 
-  collector:
+  app:
     build:
       context: .
-      dockerfile: Dockerfile.python
+      dockerfile: Dockerfile
     depends_on:
       - redis
+    ports:
+      - "3000:3000"   # API TS (processus principal + WebSocket)
+      - "8080:8080"   # Cache Go (interne, exposé ici pour debug local)
+      - "9090:9090"   # Relais WebSocket Rust
     environment:
       - REDIS_URL=redis://redis:6379
+      - PORT=3000
+      # - API_KEY=change-me   # décommenter pour protéger /api/seed et /api/matches/update
     restart: unless-stopped
-
-  api-ts:
-    build:
-      context: .
-      dockerfile: Dockerfile.ts
-    ports:
-      - "3000:3000"
-    depends_on:
-      - redis
-    environment:
-      - REDIS_URL=redis://redis:6379
-
-  api-go:
-    build:
-      context: .
-      dockerfile: Dockerfile.go
-    ports:
-      - "8080:8080"
-    depends_on:
-      - redis
-    environment:
-      - REDIS_ADDR=redis:6379
-
-  api-rust:
-    build:
-      context: .
-      dockerfile: Dockerfile.rust
-    ports:
-      - "9090:9090"
-    depends_on:
-      - api-ts
-    environment:
-      - UPSTREAM_WS=ws://api-ts:3000
