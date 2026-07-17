@@ -24,12 +24,14 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates libssl3 python3 python3-pip bash \
     && rm -rf /var/lib/apt/lists/*
-RUN pip3 install --no-cache-dir --break-system-packages aiohttp aioredis
+
+WORKDIR /app
+COPY collector/requirements.txt ./requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Node.js complet, copié depuis ts-stage (même version, pas de mismatch)
 COPY --from=ts-stage /usr/local /usr/local
 
-WORKDIR /app
 COPY --from=ts-stage /app ./ts
 COPY --from=go-stage /livescore-go /usr/local/bin/livescore-go
 COPY --from=rust-stage /build/target/release/livescore-rust /usr/local/bin/livescore-rust

@@ -33,15 +33,14 @@ rdb     *redis.Client
 ctx     context.Context
 }
 
-func NewCacheService(redisAddr string) *CacheService {
-// Déterminer si TLS est needed (Upstash a "upstash.io" dans l'adresse)
-useTLS := strings.Contains(redisAddr, "upstash.io")
-
-opts := &redis.Options{
-Addr: redisAddr,
+func NewCacheService(redisURL string) *CacheService {
+opts, err := redis.ParseURL(redisURL)
+if err != nil {
+log.Fatalf("[Go] Erreur parsing Redis URL: %v", err)
 }
 
-if useTLS {
+// Ajouter TLS si c'est Upstash
+if strings.Contains(redisURL, "upstash.io") {
 opts.TLSConfig = &tls.Config{
 InsecureSkipVerify: false,
 }
@@ -128,12 +127,12 @@ json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func main() {
-redisAddr := os.Getenv("REDIS_ADDR")
-if redisAddr == "" {
-redisAddr = "localhost:6379"
+redisURL := os.Getenv("REDIS_URL")
+if redisURL == "" {
+redisURL = "redis://localhost:6379"
 }
 
-cache := NewCacheService(redisAddr)
+cache := NewCacheService(redisURL)
 go cache.SyncFromRedis()
 
 r := mux.NewRouter()
