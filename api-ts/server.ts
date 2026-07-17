@@ -45,7 +45,13 @@ interface Match {
 
 // ---------- Redis ----------
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-const redis: RedisClientType = createClient({ url: redisUrl });
+const redis: RedisClientType = createClient({ 
+  url: redisUrl,
+  socket: {
+    tls: true,
+    rejectUnauthorized: false
+  }
+});
 
 redis.on('error', (err) => {
     console.error('[Redis] Error:', err);
