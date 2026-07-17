@@ -27,7 +27,11 @@ RUN apt-get update && apt-get install -y ca-certificates libssl3 python3 python3
 
 WORKDIR /app
 COPY collector/requirements.txt ./requirements.txt
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt \
+    # Installe Chromium + toutes ses dépendances système (libnss3, libatk, fonts, etc.)
+    # requis par Playwright pour tourner en headless dans ce conteneur.
+    && python3 -m playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 # Node.js complet, copié depuis ts-stage (même version, pas de mismatch)
 COPY --from=ts-stage /usr/local /usr/local
