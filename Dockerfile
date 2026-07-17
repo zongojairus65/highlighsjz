@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y ca-certificates libssl3 python3 python3
 
 WORKDIR /app
 COPY collector/requirements.txt ./requirements.txt
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Node.js complet, copié depuis ts-stage (même version, pas de mismatch)
 COPY --from=ts-stage /usr/local /usr/local
