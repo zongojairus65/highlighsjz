@@ -1,76 +1,201 @@
 import asyncio
-import aiohttp
 import json
 from datetime import datetime
 import os
 import redis.asyncio as aioredis
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+
+class SofascoreScraper:
+    """Scraper sofascore.com pour matchs en live"""
+    
+    async def fetch_live_matches(self):
+        """Retourne les matchs en live depuis sofascore"""
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                
+                await page.goto("https://www.sofascore.com/football", timeout=30000)
+                await page.wait_for_timeout(5000)  # Attendre le rendu JS
+                
+                # Extraire les matchs du DOM
+                matches_data = await page.evaluate("""
+                    () => {
+                        const matches = [];
+                        document.querySelectorAll('[data-testid="event"]').forEach(el => {
+                            const homeTeam = el.querySelector('[data-testid="home-team-name"]')?.textContent;
+                            const awayTeam = el.querySelector('[data-testid="away-team-name"]')?.textContent;
+                            const score = el.querySelector('[data-testid="score"]')?.textContent;
+                            const status = el.querySelector('[data-testid="status"]')?.textContent;
+                            
+                            if (homeTeam && awayTeam && score) {
+                                matches.push({
+                                    home_team: homeTeam.trim(),
+                                    away_team: awayTeam.trim(),
+                                    score: score.trim(),
+                                    status: status ? status.trim() : 'live',
+                                    league: 'Mixed'
+                                });
+                            }
+                        });
+                        return matches;
+                    }
+                """)
+                
+                await browser.close()
+                return matches_data
+        except Exception as e:
+            print(f"[Sofascore] Erreur: {e}")
+            return []
+
+class LivescoreScraper:
+    """Scraper livescore.com pour matchs en live"""
+    
+    async def fetch_live_matches(self):
+        """Retourne les matchs en live depuis livescore"""
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                
+                await page.goto("https://www.livescore.com/", timeout=30000)
+                await page.wait_for_timeout(5000)
+                
+                matches_data = await page.evaluate("""
+                    () => {
+                        const matches = [];
+                        document.querySelectorAll('.ScoreTable_match').forEach(el => {
+                            const home = el.querySelector('.ScoreTable_home .ScoreTable_teamName')?.textContent;
+                            const away = el.querySelector('.ScoreTable_away .ScoreTable_teamName')?.textContent;
+                            const score = el.querySelector('.ScoreTable_score')?.textContent;
+                            
+                            if (home && away && score) {
+                                matches.push({
+                                    home_team: home.trim(),
+                                    away_team: away.trim(),
+                                    score: score.trim(),
+                                    status: 'live',
+                                    league: 'Mixed'
+                                });
+                            }
+                        });
+                        return matches;
+                    }
+                """)
+                
+                await browser.close()
+                return matches_data
+        except Exception as e:
+            print(f"[Livescore] Erreur: {e}")
+            return []
+
+class Scraper1xbet:
+    """Scraper 1xbet.bf pour matchs en live"""
+    
+    async def fetch_live_matches(self):
+        """Retourne les matchs en live depuis 1xbet"""
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                
+                await page.goto("https://1xbet.bf/", timeout=30000)
+                await page.wait_for_timeout(5000)
+                
+                matches_data = await page.evaluate("""
+                    () => {
+                        const matches = [];
+                        document.querySelectorAll('.line-event').forEach(el => {
+                            const home = el.querySelector('.team-home')?.textContent;
+                            const away = el.querySelector('.team-away')?.textContent;
+                            const score = el.querySelector('.event-score')?.textContent;
+                            
+                            if (home && away && score) {
+                                matches.push({
+                                    home_team: home.trim(),
+                                    away_team: away.trim(),
+                                    score: score.trim(),
+                                    status: 'live',
+                                    league: 'Mixed'
+                                });
+                            }
+                        });
+                        return matches;
+                    }
+                """)
+                
+                await browser.close()
+                return matches_data
+        except Exception as e:
+            print(f"[1xbet] Erreur: {e}")
+            return []
 
 class LiveScoreCollector:
     def __init__(self):
-        self.sources = [
-            {
-                "url": "https://www.thesportsdb.com/api/v1/json/3/latestFootball.php",
-                "parser": self._parse_thesportsdb,
-            }
-        ]
         self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        self.sofascore = SofascoreScraper()
+        self.livescore = LivescoreScraper()
+        self.oneXBet = Scraper1xbet()
 
     async def connect_redis(self):
         self.redis = await aioredis.from_url(self.redis_url)
-        print(f"[Collector] Connecté à {self.redis_url}")
+        print(f"[Collector] Connecté à Redis")
 
     async def fetch_and_sync(self):
-        async with aiohttp.ClientSession() as session:
-            while True:
-                try:
-                    for source in self.sources:
-                        async with session.get(source["url"], timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                            data = await resp.json()
-                            matches = source["parser"](data)
-                            
-                            if matches:
-                                await self.redis.set(
-                                    "matches",
-                                    json.dumps(matches),
-                                    ex=300
-                                )
-                                print(f"[Collector] {len(matches)} matchs syncés à Redis")
-                            else:
-                                print("[Collector] Aucun match trouvé")
-                except Exception as e:
-                    print(f"[Collector] Erreur : {e}")
+        while True:
+            try:
+                print("[Collector] Scraping des matchs en live...")
                 
-                await asyncio.sleep(10)
+                # Scraper toutes les sources en parallèle
+                sofascore_matches = await self.sofascore.fetch_live_matches()
+                livescore_matches = await self.livescore.fetch_live_matches()
+                oneXbet_matches = await self.oneXBet.fetch_live_matches()
+                
+                # Fusionner et dédupliquer
+                all_matches = self.merge_and_deduplicate([
+                    sofascore_matches,
+                    livescore_matches,
+                    oneXbet_matches
+                ])
+                
+                if all_matches:
+                    # Enrichir avec IDs
+                    for i, match in enumerate(all_matches):
+                        match["id"] = str(i + 1)
+                        match["updated_at"] = datetime.utcnow().isoformat()
+                    
+                    await self.redis.set("matches", json.dumps(all_matches), ex=300)
+                    print(f"[Collector] ✅ {len(all_matches)} matchs syncés")
+                else:
+                    print("[Collector] ⚠️ Aucun match trouvé")
+                
+                await asyncio.sleep(30)  # Sync toutes les 30 sec
+            except Exception as e:
+                print(f"[Collector] ❌ Erreur : {e}")
+                await asyncio.sleep(30)
 
-    def _parse_thesportsdb(self, data):
-        """Parse l'API TheSportsDB"""
-        if "results" not in data:
-            return []
-
-        matches = []
-        for match_data in data.get("results", []):
-            match = {
-                "id": match_data.get("idEvent", "unknown"),
-                "home_team": match_data.get("strHomeTeam", "Unknown"),
-                "away_team": match_data.get("strAwayTeam", "Unknown"),
-                "score": f"{match_data.get('intHomeScore', 0)}-{match_data.get('intAwayScore', 0)}",
-                "status": "live" if match_data.get("strStatus") == "Live" else "scheduled",
-                "minute": match_data.get("intRoundID", 0),
-                "league": match_data.get("strLeague", "Unknown"),
-                "updated_at": datetime.utcnow().isoformat(),
-            }
-            matches.append(match)
-
-        return matches
+    def merge_and_deduplicate(self, sources):
+        """Fusionne et déduplique les matchs de plusieurs sources"""
+        seen = set()
+        merged = []
+        
+        for source_matches in sources:
+            for match in source_matches:
+                key = f"{match['home_team']}_{match['away_team']}".lower()
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(match)
+        
+        return merged
 
 async def main():
     collector = LiveScoreCollector()
     try:
         await collector.connect_redis()
-        print("[Collector] Démarrage de la synchronisation...")
+        print("[Collector] 🚀 Démarrage du scraping...")
         await collector.fetch_and_sync()
     except Exception as e:
-        print(f"[Collector] Erreur fatale: {e}")
+        print(f"[Collector] ❌ Erreur fatale: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
